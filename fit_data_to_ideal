@@ -1,0 +1,203 @@
+import os
+import matplotlib.pyplot as plt
+import openpyxl as px
+import math
+import numpy as np
+import copy
+import numpy.matlib
+from functools import partial
+from scipy import signal, interpolate
+
+pi = math.pi
+theta_step = 2*pi/720
+
+
+def polar_coord(pxy,cxy):
+    pp = np.array(pxy) - np.array(cxy)
+    distance = np.hypot(pp[0],pp[1])
+    theta = math.atan2(pp[1],pp[0])    
+    return [theta,distance]
+
+def contour_fcn(contour_point,center_point,direction = 0):
+    fcn = partial(polar_coord,center_point)
+    res_list = list(map(fcn,contour_point))
+    origin_fcn = np.array(res_list)
+#    idx = np.argmax(origin_fcn[:,1]) # find index with max distance -> find vehicle front (and its direction), change front direction to 0 rad
+#    shift_value = origin_fcn[idx,0]
+#    shifted_fcn = origin_fcn - numpy.matlib.repmat(np.array([direction,0]),origin_fcn.shape[0],1)
+#    for i, rad in enumerate(shifted_fcn[:,0]):
+#        if rad < 0:
+#            shifted_fcn[i,0] += 2*pi
+    shift_rad = []
+    for rad in origin_fcn[:,0]:
+        rad_temp = rad - direction
+        if rad_temp > 0:
+            shift_rad.append(rad_temp)
+        else:
+            while rad_temp < 0:
+                rad_temp += 2*pi
+            shift_rad.append(rad_temp)
+#            print(shift_rad)
+    shifted_fcn = np.vstack((np.array(shift_rad),origin_fcn[:,1])).T
+    return origin_fcn, shifted_fcn
+
+def fcn_to_contour(fcn,center_point,direction):
+    cc = []
+    for pf in fcn:
+        x = math.cos(pf[0] - direction) * pf[1] + center_point[0]
+        y = math.sin(pf[0] - direction) * pf[1] + center_point[1]
+        cc.append([x,y])
+    return np.array(cc)
+
+
+def continuity(fcn, th = pi/36):
+    t1 = fcn[0:-1,0]
+    t2 = fcn[1:,0]
+    t_diff = abs(t2 - t1)
+    idx = []
+    for itt,tt in enumerate(t_diff):
+        if tt > th:
+            idx.append(itt+1)
+    if len(idx) > 0:
+        fcn_cont = np.split(fcn,idx)
+    else:
+        fcn_cont = [fcn]        
+    return fcn_cont
+
+def my_ceil(val,element = theta_step):
+    return val // element * element
+    
+def my_interpolate(fn,step = theta_step):
+    v_start = my_ceil(min(fn[:,0]))
+    v_stop = my_ceil(max(fn[:,0])) #be careful with ceiling process, which can result in a value larger then the limited range [concern]
+    x_range = np.arange(v_start,v_stop,step) #the v_stop (by which the value of the last element is v_stop - step) is used to avoid the above concern
+    f1 = interpolate.interp1d(fn[:,0], fn[:,1],axis=0, fill_value="extrapolate")
+    y1 = f1(x_range)
+    fn2 = np.vstack((x_range,y1)).T
+    idx = int(v_start // step)
+    
+#    print(idx)
+#    print(fn)
+    return fn2, idx
+
+def cost_fcn(x):
+    center_init = [x[0], x[1]]
+    direction_init = x[2]
+    _, lidar_fcn = contour_fcn(dtp,center_init,direction_init)
+    data = continuity(lidar_fcn,pi/4)
+    data_itp = []
+    data_idx = []
+    for d in data:
+        d_itp, d_idx = my_interpolate(d)
+        data_itp.append(d_itp)
+        data_idx.append(d_idx)
+    
+    cost = 0
+    
+    
+    for a,b in zip(data_itp,data_idx):
+#        print(b)
+        idx_start = b
+        idx_end = int(b+len(a))
+        ref = vc2[idx_start:idx_end,:] #
+
+        fcn_diff = abs(ref[:,1] - a[:,1])
+
+        est_val = (2 * sum(fcn_diff) - fcn_diff[0] - fcn_diff[-1]) / (2 * len(fcn_diff) - 1)
+        cost += est_val
+    return cost
+
+def numerical_diff(f, x, i):
+    """中央差分を元に数値微分する関数 (偏微分)
+
+    :param function f: 偏微分する関数
+    :param numpy.ndarray x: 偏微分する引数
+    :param int i: 偏微分する変数のインデックス
+    """
+    # 丸め誤差で無視されない程度に小さな値を用意する
+    h = 1e-4
+    # 偏微分する変数のインデックスにだけ上記の値を入れる
+    h_vec = np.zeros_like(x)
+    h_vec[i] = h
+    # 数値微分を使って偏微分する
+    return (f(x + h_vec) - f(x - h_vec)) / (2 * h)
+
+
+def numerical_gradient(f, x):
+    """勾配を計算する関数
+
+    勾配というのは、全ての変数について偏微分した結果をベクトルとしてまとめたものを言う。
+    """
+    # 勾配を入れるベクトルをゼロで初期化する
+    grad = np.zeros_like(x)
+
+    for i, _ in enumerate(x):
+        # i 番目の変数で偏微分する
+        grad[i] = numerical_diff(f, x, i)
+
+    # 計算した勾配を返す
+    return grad
+
+
+def gradient_descent(f, initial_position, learning_rate=0.1, steps=150):
+    """勾配法で最小値を求める関数
+
+    :param function f: 最小値を見つけたい関数
+    :param numpy.ndarray initial_position: 関数の初期位置
+    :param float learning_rate: 学習率
+    :param int steps: 学習回数
+    """
+    # 現在地を示すカーソル
+    x = initial_position
+
+    # 学習を繰り返す
+    for _ in range(steps):
+        # 現在地の勾配 (どちらにどれだけ進むべきか) を得る
+        grad = numerical_gradient(f, x)
+        # 勾配を元にして現在地を移動する
+        x -= learning_rate * grad
+
+    # 最終的な位置を返す
+    return x
+
+
+#def main():
+#    # 勾配法を使って関数 f() の最小値を探す (初期位置は 1, 2)
+#    min_pos = gradient_descent(f, [-1.5, 4.5, pi/2])
+#    print('勾配法が見つけた最小値: {0}'.format(min_pos))
+
+fname = "cd_IS250_v2.npy"
+vehicle_contour = np.load(fname)
+vc2 = np.vstack((vehicle_contour,vehicle_contour))
+
+name2 = "vehicle_lidar_data.npy"
+lidar_v = np.load(name2) # lidar vehicle
+dtp = lidar_v.T.tolist()
+
+
+fn_array = copy.copy(vehicle_contour)
+fig2 = plt.figure()
+plt.scatter(fn_array[:,0],fn_array[:,1],s = 3)
+
+# find best center and direction
+min_pos = gradient_descent(cost_fcn, [-1.8, 4.8, pi/2])
+
+_, result = contour_fcn(dtp,[min_pos[0],min_pos[1]],min_pos[2])
+data_res = continuity(result,pi/4)
+
+#fig3 = plt.figure()
+for ddd in data_res:
+    plt.scatter(ddd[:,0],ddd[:,1],s = 3)
+
+ppp = vehicle_contour.copy()
+#fig4 = plt.figure()
+#plt.polar(ppp[:,0],ppp[:,1])
+
+rr = np.array(dtp)
+fig1 = plt.figure()
+plt.xlim(-3, 3)
+plt.ylim(2, 8)
+plt.gca().set_aspect('equal', adjustable='box')
+plt.scatter(rr[:,0],rr[:,1])
+pp = fcn_to_contour(ppp,[min_pos[0],min_pos[1]],min_pos[2])
+plt.scatter(pp[:,0],pp[:,1])
