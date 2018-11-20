@@ -1,0 +1,406 @@
+import os
+import matplotlib.pyplot as plt
+import openpyxl as px
+import math
+import numpy as np
+import copy
+from statistics import mean, median, stdev
+from sklearn.cluster import DBSCAN
+from sklearn import metrics, linear_model
+from matplotlib.collections import PolyCollection
+ 
+#Basic version, work on BW 3 GHz
+
+#Params description
+#Params_Tar[0]  Point number [avg, min, max, weight]
+#Params_Tar[1]  Stdev [avg, min, max, weight]
+#Params_Tar[2]  Power [avg, min, max, weight]
+#Params_Tar[3]  Size?  ...TBD
+
+offset_x = -1
+offset_y = 0
+System_center = np.array([0,0])
+
+weight_PN = 1/3
+weight_Stdev = 1/3
+weight_Power = 1/3
+
+#Targets
+Targets = ["Vehicle","Fence","Pillar","PB"]
+#Targets = ["Vehicle","Fence","Pillar"]
+
+#Params at 3 GHz
+Params_Vehicle = [[14.444,13.667,15.333,weight_PN],[0.506,0.478,0.524,weight_Stdev],[107.1,90.8,122.3,weight_Power]]
+Params_Fence = [[9.111,8.333,10.333,weight_PN],[0.359,0.287,0.471,weight_Stdev],[105.1,86.6,123.5,weight_Power]]
+Params_Pillar = [[11.111,10.333,12,weight_PN],[0.148,0.142,0.156,weight_Stdev],[102.7,75.5,121.7,weight_Power]]
+Params_PB = [[2.222,0.333,3.333,weight_PN],[0.327,0.268,0.386,weight_Stdev],[82.5,67.0,99.5,weight_Power]]
+
+
+database = [Params_Vehicle, Params_Fence, Params_Pillar, Params_PB]
+#database = [Params_Vehicle, Params_Fence, Params_Pillar]
+
+
+def location_filter(point_cluster):
+    new_cluster = []
+    for point in point_cluster:
+        if point[0] < -5 or point[0] > 5 or point[1] > 15 or point[1] < 1.5:
+            continue
+        elif point[0] < -3 and point[1] > 10:
+            continue
+        else:
+            new_cluster.append(point)
+            new_array = np.array(new_cluster)
+    return new_array
+
+
+def cal_feature(point_cluster):
+    radar_used = point_cluster[:,6]
+    radar_num = len(set(radar_used))
+    point_num = point_cluster.shape[0] / radar_num
+    
+    xcoords = point_cluster[:,3]
+    ycoords = point_cluster[:,4]    
+    
+    p_center = [mean(xcoords),mean(ycoords)]
+    distances = [np.hypot((xx-p_center[0]),(yy-p_center[1])) for xx, yy in zip(xcoords, ycoords)]
+    point_stdev = stdev(distances)
+    
+    ranges = np.array([np.hypot(x,y) for x, y in zip(xcoords, ycoords)])    
+    
+    power_data = point_cluster[:,5]
+    compensated_power = np.array([aa + 40 * math.log10(dd) for aa, dd in zip(power_data,ranges)])    
+    power_equivalent = mean(compensated_power)
+    
+    features = [point_num, point_stdev, power_equivalent, radar_num]
+
+    return features
+
+
+def disagreement_eval(val,ref_val,weight):
+    
+    mismatch = abs(val - ref_val) / ref_val * weight
+    if mismatch > weight:
+        mismatch = weight
+
+    return mismatch
+
+
+def recognize_basic(features,refs):
+    likelihood = 1
+    for feature, ref in zip(features, refs):
+#        if ref[1] < feature < ref[2]:
+#            continue
+#        else:        
+        mismatch_val = disagreement_eval(feature,ref[0],ref[3])
+        likelihood -= mismatch_val
+            
+    return likelihood
+
+def my_DBSCAN(point_cloud, Eps0 = 1, MinSamples0 = 3):
+    X = point_cloud[:,3:5]
+    
+    # #############################################################################
+    # Compute DBSCAN
+    db = DBSCAN(eps=Eps0, min_samples=MinSamples0).fit(X)
+    core_samples_mask = np.zeros_like(db.labels_, dtype=bool)
+    core_samples_mask[db.core_sample_indices_] = True
+    labels = db.labels_
+    
+    # Number of clusters in labels, ignoring noise if present.
+    n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+    
+#    print('Estimated number of clusters: %d' % n_clusters_)
+#    print("Silhouette Coefficient: %0.3f"
+#          % metrics.silhouette_score(X, labels))    
+    # #############################################################################
+    # Plot result
+    
+    # Black removed and is used for noise instead.
+    unique_labels = set(labels)
+    colors = [plt.cm.Spectral(each)
+              for each in np.linspace(0, 1, len(unique_labels))]
+    
+    clustered_data = [] #clustered point cloud
+    noise_data = []
+    fig1 = plt.figure()
+    for k, col in zip(unique_labels, colors):
+        content = []
+        c2 = []
+        if k == -1:
+            # Black used for noise.
+            col = [0, 0, 0, 1]
+    
+        class_member_mask = (labels == k)
+    
+        xy = point_cloud[class_member_mask & core_samples_mask]
+        if k != -1:
+            content.append(k)
+            content.append(len(xy))
+            content.append(xy)
+            clustered_data.append(content)
+            plt.plot(xy[:, 3], xy[:, 4], 'o', markerfacecolor=tuple(col),
+                     markeredgecolor='k', label = "cluster" + str(k+1), markersize=6)
+        else:
+            plt.plot(xy[:, 3], xy[:, 4], 'o', markerfacecolor=tuple(col),
+                     markeredgecolor='k', label = "noise", markersize=3)
+    
+        xy = point_cloud[class_member_mask & ~core_samples_mask]
+        plt.plot(xy[:, 3], xy[:, 4], 'o', markerfacecolor=tuple(col),
+                 markeredgecolor='k', markersize=3)
+        if k == -1:
+            c2.append(k)
+            c2.append(len(xy))
+            c2.append(xy)
+            noise_data.append(c2)
+            
+    plt.legend(loc='upper left', borderaxespad=0, fontsize=16, fancybox=True, framealpha=0)    
+    plt.title('Estimated number of clusters: %d' % n_clusters_)
+    plt.xlim(-8,8)
+    plt.ylim(0,16)
+#    plt.show()
+    fig1.savefig('DBSCAN.png')    
+    
+    return clustered_data, noise_data
+    
+def cluster_mix(cluster,cluster_dist = 4):
+    for item in cluster:
+        data = item[2]
+        pc_x, pc_y = np.mean(data[:,3:5], axis = 0)
+        pc_xy = np.array([pc_x, pc_y])
+        distance = dbc(pc_xy, System_center)
+        item.append(distance)
+        item.append(np.array([pc_x,pc_y]))
+    ctp = cluster.copy() #cluster to process, [Important] use copy not address refer to avoid influence on original data
+    mixed = [] #completed cluster
+    no_cluster = 0
+    while len(ctp) > 1:
+        distances = [dd[3] for dd in ctp]
+        no_md = distances.index(min(distances)) #No. of cluster with min distance from point(0,0)        
+        pc0 = ctp[no_md]
+        ref_center = pc0[4] #referece cluster center coordinates(mean value) 
+        data0 = pc0[2]
+        X = data0[:,3].reshape(-1,1)
+        Y = data0[:,4].reshape(-1,1)
+        clf = linear_model.LinearRegression()
+        clf.fit(X, Y)
+        """line1: linear fit of ref cluster"""
+        slope0 = clf.coef_[0][0] #coef_parallel
+        intercept0 = clf.intercept_[0] #intercept_parallel
+        """line2: line perpendiclular to line1 and pass its cluster center"""
+        slope1 = -1/slope0 #coef_perpendicular
+        intercept1 = ref_center[1] - slope1 * ref_center[0] #intercept_perpendicular
+        xy = data0[:,3:5]
+        theta = math.atan(slope0)
+        ref_long, ref_short = max_size(xy,theta)
+        del ctp[no_md]
+        dbcs = [dbc(pc[4],ref_center) for pc in ctp] #distance between clusters
+        sorted_ctp = [x for _, x in sorted(zip(dbcs,ctp))]
+        change = False
+        for ii, pc in enumerate(sorted_ctp):
+            tar_center = pc[4]
+            if dbc(tar_center,ref_center) < cluster_dist:
+                d0 = abs(slope0 * tar_center[0] - tar_center[1] + intercept0) / math.sqrt(slope0**2 + 1) # distance from target center coords to line1
+                d1 = abs(slope1 * tar_center[0] - tar_center[1] + intercept1) / math.sqrt(slope1**2 + 1) # distance from target center coords to line2
+                data1 = pc[2]
+                if d0 < 1 or d1 < 1:
+                    xy1 = np.vstack((xy,data1[:,3:5]))
+                    comb_long, comb_short = max_size(xy1,theta)
+                    if (comb_long < 6 and comb_short < 3) or (comb_long < 3 and comb_short < 6):
+                        change = True
+                        new_data = np.vstack((data0,data1))
+                        pc_x, pc_y = np.mean(new_data[:,3:5], axis = 0)
+                        distance = np.hypot(pc_x, pc_y)
+                        new_cluster = [99,new_data.shape[0],new_data,distance,np.array([pc_x,pc_y])]
+                        del sorted_ctp[ii]
+                        sorted_ctp.append(new_cluster)
+                        ctp = sorted_ctp.copy()
+                        break
+        if change == False:
+            pc0[0] = no_cluster
+            no_cluster += 1
+            mixed.append(pc0)
+#    return ctp
+    if len(ctp) > 0:
+        ctp[0][0] = no_cluster
+        mixed.append(ctp[0])
+    return mixed
+
+def dbc(p1,p2):
+    vec = p1 - p2
+    dist = np.hypot(vec[0],vec[1])
+    return dist
+
+def max_size(points,theta):
+    deg = -1 * theta
+    m_rot = np.array([[math.cos(deg),-1*math.sin(deg)],[math.sin(deg),math.cos(deg)]])
+    pps = np.copy(points)
+    rotated_pps = np.zeros((0,2))
+    for pp in pps:
+        rotated_pps = np.vstack((rotated_pps,np.dot(m_rot,pp.reshape(-1,1)).T))
+    max_length0 = max(rotated_pps[:,0]) - min(rotated_pps[:,0])    #max length parallel to linear fitting line  
+    max_length1 = max(rotated_pps[:,1]) - min(rotated_pps[:,1])    #max length perpendicular to linear fitting line
+#    print("L0 " + str(max_length0))
+#    print("L1 " + str(max_length1))
+    return max_length0, max_length1
+
+def make_box(points,theta,slope0,slope1):
+    deg = -1 * theta
+    m_rot = np.array([[math.cos(deg),-1*math.sin(deg)],[math.sin(deg),math.cos(deg)]])
+    pps = np.copy(points)
+    rotated_pps = np.zeros((0,2))
+    for pp in pps:
+        rotated_pps = np.vstack((rotated_pps,np.dot(m_rot,pp.reshape(-1,1)).T))
+    ppx = list(rotated_pps[:,0])    
+    ppy = list(rotated_pps[:,1])
+    i_r = ppx.index(max(ppx))
+    i_l = ppx.index(min(ppx))
+    i_t = ppy.index(max(ppy))
+    i_b = ppy.index(min(ppy))
+    right = pps[i_r]
+    left = pps[i_l]
+    top = pps[i_t]
+    bottom = pps[i_b]
+    #line1
+    s1 = slope1
+    i1 = -1 * slope1 * (right[0]) + right[1]
+    line1 = [s1,i1]
+    #line2
+    s2 = slope0
+    i2 = -1 * slope0 * (top[0]) + top[1]
+    line2 = [s2,i2]
+    #line3
+    s3 = slope1
+    i3 = -1 * slope1 * (left[0]) + left[1]    
+    line3 = [s3,i3]
+    #line4
+    s4 = slope0
+    i4 = -1 * slope0 * (bottom[0]) + bottom[1]    
+    line4 = [s4,i4]
+#    lines = [line1,line2,line3,line4]
+    verts = [lli(line1,line2),lli(line2,line3),lli(line3,line4),lli(line4,line1)]
+
+    
+    return verts
+
+def lli(line1,line2):
+    a = line1[0]
+    b = line2[0]
+    c = line1[1]
+    d = line2[1]
+    if a != b:
+        x = (d-c) / (a-b)
+        y = (a * d - b * c) / (a - b)
+        return (x, y)
+
+def visualize(clusters,silhouette = True, lidar_plot = True):
+    from scipy.spatial import ConvexHull
+    colors = [plt.cm.Spectral(each)
+              for each in np.linspace(0, 1, len(clusters))]
+    fig2 = plt.figure()
+    ax = fig2.add_subplot(1,1,1)
+    for k, (cluster, col) in enumerate(zip(clusters, colors)):
+        data = cluster[2]
+        xy0 = data[:,3:5]
+        plt.plot(xy0[:, 0], xy0[:, 1], 'o', markerfacecolor=tuple(col),
+                 markeredgecolor='k', label = "cluster" + str(k+1), markersize=6)
+#        plt.legend(loc='upper left', borderaxespad=0, fontsize=16, fancybox=True, framealpha=0, handletextpad = 0)    
+#        plt.title('Estimated number of clusters: %d' % len(clusters))
+
+        major_xticks = np.arange(-4,5,2)
+        major_yticks = np.arange(0,12,2)
+        ax.set_xticks(major_xticks)
+        ax.set_yticks(major_yticks)
+        ax.set_xlim([-5, 5])
+        ax.set_ylim([0, 10])                    
+#        ax.grid(which = 'both')
+        if lidar_plot == True:
+            x_lidar = [x_value - 1 for x_value in lidar[0,:]]
+            y_lidar = [y_value for y_value in lidar[1,:]]
+            plt.scatter(x_lidar, y_lidar, marker='.', alpha = 0.3, s = 5, c ="k")
+        if silhouette == True:
+#            cluster_center = cluster[4] #referece cluster center coordinates(mean value) 
+#            xy = copy.copy(xy0)
+            hull = ConvexHull(xy0)
+            xy = xy0[hull.vertices]
+#            plt.plot(xy[:, 0], xy[:, 1], '+', markerfacecolor=tuple(col),
+#                 markeredgecolor='r',  markersize=5)
+#            X = data[:,3].reshape(-1,1)
+#            Y = data[:,4].reshape(-1,1)
+            xyd = []
+            for axy in xy:
+                xyd.append(dbc(axy, System_center))
+            i_min = xyd.index(min(xyd))
+            cxy = xy[i_min] #closest point to [0,0]
+            if cxy[0] != 0:
+                theta_cxy = math.atan2(cxy[1],cxy[0])
+            else:
+                theta_cxy = math.pi/2
+                
+            sp = [] #selected points
+            sp_theta = []
+            print(cxy)
+            fdist = 1 #filtering distance to cxy [unit: m]
+            for i_pp, (pp, dist) in enumerate(zip(xy,xyd)):
+                if i_pp != i_min:
+                    if dist - min(xyd) < fdist:
+                        if pp[0] != 0:
+                            theta_pp = math.atan2(pp[1],pp[0])
+                        else:
+                            theta_pp = math.pi/2
+                        theta_sp = abs(theta_pp - theta_cxy)
+                        sp.append(pp)
+                        sp_theta.append(theta_sp)
+            print(sp)
+            sxy = sp[sp_theta.index(max(sp_theta))]
+            print(sp_theta)
+            
+            """line0: the direction"""
+            line0 = sxy - cxy
+            if line0[0] != 0:
+                slope0 = line0[1]/line0[0]
+            else:
+                slope0 = 1e10
+            
+            slope1 = -1/slope0
+#           
+            theta = math.atan(slope0)
+            print(str(k+1) + ": " + str(round(np.rad2deg(theta),2)))
+            verts = make_box(xy0,theta,slope0,slope1)
+#            return verts
+            poly = PolyCollection([verts], facecolor = 'none', edgecolor = 'g', linestyle = 'dashed', closed = True)
+            plt.gcf().gca().add_artist(poly)
+    fig2.savefig('modified.png')
+
+
+
+
+
+
+folder = "data_Vehicle"
+
+
+"""Run"""
+name = "data_to_clustering.npy"
+aa = np.load(name)
+name2 = "data_PL_all_BW3_rp0_save.npy"
+bb = np.load(name2)
+lidar = bb[2]
+offset_array = np.tile(np.array([0,0,0,offset_x,offset_y,0,0]),(aa.shape[0],1))
+aa_offset =  aa + offset_array
+#bb = location_filter(aa)
+cc, dd = my_DBSCAN(aa_offset)
+cc2 = copy.deepcopy(cc)
+tt = cluster_mix(cc2)
+visualize(tt, True)
+for item in tt:
+    if item[1] > 1:
+        no, ee = item[0]+1, item[2]
+        ff = cal_feature(ee)
+        
+        res_eval = [recognize_basic(ff,refs) for refs in database]
+    
+        max_likelihood = max(res_eval)
+        eval_target = Targets[res_eval.index(max_likelihood)]
+        print("Estimated result of Cluster %d: %s" %(no,eval_target))
+        print("Likelihood ratio:",round(max_likelihood,3))
+        print([str(round(fff,2)) for fff in ff])
