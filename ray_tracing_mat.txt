@@ -1,0 +1,3 @@
+http://www.cs.cornell.edu/courses/cs4620/2013fa/lectures/03raytracing1.pdf
+
+good instruction though difficult...
