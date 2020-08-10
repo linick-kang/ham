@@ -1,0 +1,3 @@
+qt issue quick fix: https://github.com/spyder-ide/spyder/issues/13275
+download https://github.com/ipython/ipykernel/blob/4a05435220c730605ab454001ac3ecc364299736/ipykernel/eventloops.py
+and replace the current file eventloops.py under pathToAnacondaInstallation\envs\yourEnvironment\Lib\site-packages\ipykernel
