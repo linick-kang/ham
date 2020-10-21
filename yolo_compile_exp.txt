@@ -1,0 +1,7 @@
+darknet yolo compile exp
+
+countless time report CDLL error for not have ('yolo_cpp_dll.dll')
+
+True reason:
+1. Compile both darknet.sln yolo_cpp_dll.sln properly!
+2. Make use darknet.exe can run normally! (eg. no MSVCR100.dll file)
